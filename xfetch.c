@@ -52,6 +52,37 @@ char* get_os_name() {
     return NULL; // Return NULL if PRETTY_NAME is not found
 }
 
+char* get_uptime() {
+    FILE* upt = popen("uptime -p", "r");
+    if (upt == NULL) {
+        perror("Error executing 'uptime'");
+        if (upt) pclose(upt);
+        return NULL;
+    }
+
+    char uptstr[MAX_LINE_LENGTH];
+
+    if (fgets(uptstr, sizeof(uptstr), upt) == NULL) {
+        perror("Failed to read output of system command");
+        pclose(upt);
+        return NULL;
+    }
+    
+    uptstr[strcspn(uptstr, "\n")] = '\0';
+    pclose(upt);
+
+    const char* trimmed = uptstr + 3; // trim the "up " part of the output
+
+    char* uptime = (char*)malloc(strlen(trimmed) + 1); // +1 for null terminator
+    if (uptime == NULL) {
+        perror("Memory allocation failed");
+        return NULL;
+    }
+
+    strcpy(uptime, trimmed);
+    return uptime;
+}
+
 // Function to get the desktop environment
 char* get_desktop() {
     char* xdgDesktop = getenv("XDG_CURRENT_DESKTOP");
@@ -115,6 +146,35 @@ char* get_kernel() {
 
     snprintf(kernel_info, strlen(os_str) + strlen(kernel_str) + 2, "%s %s", os_str, kernel_str);
     return kernel_info;
+}
+
+char* get_hostname() {
+    FILE* hst = open_file("/etc/hostname", "r");
+    if (hst == NULL) {
+        perror("Error opening /etc/hostname");
+        if (hst) pclose(hst);
+        return NULL;
+    }
+
+    char hst_str[MAX_LINE_LENGTH];
+
+    if (fgets(hst_str, sizeof(hst_str), hst) == NULL) {
+        perror("Failed to read file");
+        pclose(hst);
+        return NULL;
+    }
+
+    hst_str[strcspn(hst_str, "\n")] = '\0';
+    pclose(hst);
+
+    char* hostname = (char*)malloc(strlen(hst_str) + 1); // +1 for null terminator
+    if (hostname == NULL) {
+        perror("Memory allocation failed"); 
+        return NULL;
+    }
+
+    strcpy(hostname, hst_str);
+    return hostname;
 }
 
 // Function to extract the first version number from a string
@@ -186,7 +246,16 @@ int main() {
     char* desktop_name = get_desktop();
     char* session_type = get_session();
     char* kernel = get_kernel();
+    char* uptime = get_uptime();
+    char* hostname = get_hostname();
     char* shell = get_shell_with_version();
+
+    if (hostname != NULL) {
+        printf("Hostname: %s\n", hostname);
+        free(hostname);
+    } else {
+        printf("Hostname not found.\n");
+    }
 
     if (os_name != NULL) {
         printf("Operating System: %s\n", os_name);
@@ -213,6 +282,13 @@ int main() {
         free(kernel);
     } else {
         printf("Kernel not recognized.\n");
+    }
+
+    if (uptime != NULL) {
+        printf("Uptime: %s\n", uptime);
+        free(uptime);
+    } else {
+        printf("Uptime not recognized.\n");
     }
 
     if (shell != NULL) {

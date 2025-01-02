@@ -3,299 +3,217 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <limits.h>
+#include <sys/utsname.h>
+#include <sys/sysinfo.h>
+#include <wayland-client.h>
+#include <X11/Xlib.h>
 
 #define MAX_LINE_LENGTH 256
 
-// Helper function to safely open a file
-FILE* open_file(const char* path, const char* mode) {
-    FILE* file = fopen(path, mode);
-    if (file == NULL) {
-        perror("Error opening file");
-    }
-    return file;
+// A helper function to handle errors and exit
+void handle_error(const char* message) {
+    perror(message);
+    exit(EXIT_FAILURE);
 }
 
-// Function to extract a string enclosed in quotes
+// Function to initialize and retrieve system information
+struct utsname get_system_info() {
+    struct utsname sys_info;
+    if (uname(&sys_info) == -1) {
+        handle_error("Error initializing system information");
+    }
+    return sys_info;
+}
+
+// Function to retrieve runtime system information
+struct sysinfo get_system_runtime_info() {
+    struct sysinfo sys_runtime_info;
+    if (sysinfo(&sys_runtime_info) == -1) {
+        handle_error("Error retrieving system runtime information");
+    }
+    return sys_runtime_info;
+}
+
+// Function to read environment variables or fallback to a default
+const char* get_env_or_default(const char* var, const char* fallback) {
+    const char* value = getenv(var);
+    return value ? value : fallback;
+}
+
+// A pure function to extract a quoted string from a line
 char* extract_quoted_string(const char* line) {
-    char* start = strchr(line, '"');
-    char* end = strrchr(line, '"');
-    if (start != NULL && end != NULL && end > start) {
-        size_t name_len = end - start - 1;
-        char* result = (char*)malloc(name_len + 1);
-        if (result == NULL) {
-            perror("Memory allocation failed");
-            return NULL;
-        }
-        strncpy(result, start + 1, name_len);
-        result[name_len] = '\0'; // Null-terminate the string
+    const char* start = strchr(line, '"');
+    const char* end = strrchr(line, '"');
+    if (start && end && end > start) {
+        size_t length = end - start - 1;
+        char* result = malloc(length + 1);
+        if (!result) handle_error("Memory allocation failed");
+        strncpy(result, start + 1, length);
+        result[length] = '\0';
         return result;
     }
     return NULL;
 }
 
-// Function to get OS name from /etc/os-release
+// A pure function to get the OS name from /etc/os-release
 char* get_os_name() {
-    FILE* file = open_file("/etc/os-release", "r");
-    if (file == NULL) {
-        return NULL;
-    }
+    FILE* file = fopen("/etc/os-release", "r");
+    if (!file) return NULL;
 
     char line[MAX_LINE_LENGTH];
-    while (fgets(line, sizeof(line), file) != NULL) {
-        if (strncmp(line, "PRETTY_NAME=", 12) == 0) { // Fixed key length comparison
-            fclose(file);
-            return extract_quoted_string(line);
+    char* result = NULL;
+
+    while (fgets(line, sizeof(line), file)) {
+        if (strncmp(line, "PRETTY_NAME=", 12) == 0) {
+            result = extract_quoted_string(line);
+            break;
         }
     }
 
     fclose(file);
-    return NULL; // Return NULL if PRETTY_NAME is not found
+    return result;
 }
 
-char* get_uptime() {
-    FILE* upt = popen("uptime -p", "r");
-    if (upt == NULL) {
-        perror("Error executing 'uptime'");
-        if (upt) pclose(upt);
-        return NULL;
-    }
-
-    char uptstr[MAX_LINE_LENGTH];
-
-    if (fgets(uptstr, sizeof(uptstr), upt) == NULL) {
-        perror("Failed to read output of system command");
-        pclose(upt);
-        return NULL;
-    }
-    
-    uptstr[strcspn(uptstr, "\n")] = '\0';
-    pclose(upt);
-
-    const char* trimmed = uptstr + 3; // trim the "up " part of the output
-
-    char* uptime = (char*)malloc(strlen(trimmed) + 1); // +1 for null terminator
-    if (uptime == NULL) {
-        perror("Memory allocation failed");
-        return NULL;
-    }
-
-    strcpy(uptime, trimmed);
-    return uptime;
-}
-
-// Function to get the desktop environment
-char* get_desktop() {
-    char* xdgDesktop = getenv("XDG_CURRENT_DESKTOP");
-    if (xdgDesktop == NULL) {
-        return NULL;
-    }
-    return xdgDesktop;
-}
-
-// Function to get the session type (Wayland/X11) and capitalize it
-char* get_session() {
-    char* xdgSession = getenv("XDG_SESSION_TYPE");
-    if (xdgSession == NULL) {
-        return NULL;
-    }
-
-    // Capitalize the first letter without modifying the environment variable
-    char* session_type = strdup(xdgSession);
-    if (session_type == NULL) {
-        perror("Memory allocation failed");
-        return NULL;
-    }
-    session_type[0] = toupper(session_type[0]);
-    return session_type;
-}
-
-// Function to get the kernel information by executing 'uname'
-char* get_kernel() {
-    FILE* os_fp = popen("uname -s", "r");
-    FILE* kernel_fp = popen("uname -r", "r");
-    if (os_fp == NULL || kernel_fp == NULL) {
-        perror("Error executing 'uname'");
-        if (os_fp) pclose(os_fp);
-        if (kernel_fp) pclose(kernel_fp);
-        return NULL;
-    }
-
-    char os_str[MAX_LINE_LENGTH];
-    char kernel_str[MAX_LINE_LENGTH];
-
-    if (fgets(os_str, sizeof(os_str), os_fp) == NULL || fgets(kernel_str, sizeof(kernel_str), kernel_fp) == NULL) {
-        perror("Failed to read output of system command");
-        pclose(os_fp);
-        pclose(kernel_fp);
-        return NULL;
-    }
-
-    // Remove trailing newlines
-    os_str[strcspn(os_str, "\n")] = '\0';
-    kernel_str[strcspn(kernel_str, "\n")] = '\0';
-
-    pclose(os_fp);
-    pclose(kernel_fp);
-
-    // Concatenate OS and kernel version
-    char* kernel_info = (char*)malloc(strlen(os_str) + strlen(kernel_str) + 2); // +2 for space and null terminator
-    if (kernel_info == NULL) {
-        perror("Memory allocation failed");
-        return NULL;
-    }
-
-    snprintf(kernel_info, strlen(os_str) + strlen(kernel_str) + 2, "%s %s", os_str, kernel_str);
+// A pure function to concatenate OS and kernel version
+char* get_kernel_info(const struct utsname* sys_info) {
+    size_t length = strlen(sys_info->sysname) + strlen(sys_info->release) + 2;
+    char* kernel_info = malloc(length);
+    if (!kernel_info) handle_error("Memory allocation failed");
+    snprintf(kernel_info, length, "%s %s", sys_info->sysname, sys_info->release);
     return kernel_info;
 }
 
-char* get_hostname() {
-    FILE* hst = open_file("/etc/hostname", "r");
-    if (hst == NULL) {
-        perror("Error opening /etc/hostname");
-        if (hst) pclose(hst);
-        return NULL;
-    }
-
-    char hst_str[MAX_LINE_LENGTH];
-
-    if (fgets(hst_str, sizeof(hst_str), hst) == NULL) {
-        perror("Failed to read file");
-        pclose(hst);
-        return NULL;
-    }
-
-    hst_str[strcspn(hst_str, "\n")] = '\0';
-    pclose(hst);
-
-    char* hostname = (char*)malloc(strlen(hst_str) + 1); // +1 for null terminator
-    if (hostname == NULL) {
-        perror("Memory allocation failed"); 
-        return NULL;
-    }
-
-    strcpy(hostname, hst_str);
-    return hostname;
+// A pure function to capitalize the first character of a string
+char* capitalize_first(const char* str) {
+    if (!str) return NULL;
+    char* capitalized = strdup(str);
+    if (!capitalized) handle_error("Memory allocation failed");
+    capitalized[0] = toupper(capitalized[0]);
+    return capitalized;
 }
 
-// Function to extract the first version number from a string
-char* extract_version_number(char* version_output) {
-    char* version_start = version_output;
-    while (*version_start && !isdigit(*version_start)) {
-        version_start++;
+// A pure function to detect the session type
+char* get_session_type() {
+    const char* session_type = getenv("XDG_SESSION_TYPE");
+    if (session_type) {
+        return capitalize_first(session_type);
     }
 
-    char* version_only = (char*)malloc(128); // Allocate memory for the version number
-    if (version_only == NULL) {
-        perror("Memory allocation failed");
-        return NULL;
-    }
+    // Fallbacks
+    if (XOpenDisplay(NULL)) return strdup("X11");
+    if (wl_display_connect(NULL)) return strdup("Wayland");
 
-    int i = 0;
-    while (*version_start && (isdigit(*version_start) || *version_start == '.')) {
-        version_only[i++] = *version_start++;
-    }
-    version_only[i] = '\0'; // Null-terminate the version string
-    return version_only;
+    return strdup("Unknown");
 }
 
-// Function to get the shell and its version
-char* get_shell_with_version() {
-    pid_t ppid = getppid(); // Get the parent process ID
-    char proc_path[256];
-    char shell_name[256];
-    static char result[512]; // To store shell name and version
+// A pure function to detect the desktop environment
+char* get_desktop_environment() {
+    const char* xdg_desktop = getenv("XDG_CURRENT_DESKTOP");
+    if (xdg_desktop) return strdup(xdg_desktop);
 
-    snprintf(proc_path, sizeof(proc_path), "/proc/%d/comm", ppid);
-    FILE* fp = open_file(proc_path, "r");
-    if (fp == NULL) {
-        return NULL;
-    }
+    const char* session = getenv("DESKTOP_SESSION");
+    if (session) return strdup(session);
 
-    if (fgets(shell_name, sizeof(shell_name), fp) != NULL) {
-        shell_name[strcspn(shell_name, "\n")] = '\0'; // Remove newline character
-    } else {
-        fclose(fp);
-        return NULL;
-    }
-    fclose(fp);
+    return strdup("Unknown");
+}
 
-    // Construct the version command
-    snprintf(result, sizeof(result), "%s --version 2>&1", shell_name);
-    fp = popen(result, "r");
-    if (fp == NULL) {
-        return NULL;
-    }
+// A pure function to detect the window manager or compositor
+char* get_window_manager() {
+    const char* session_type = getenv("XDG_SESSION_TYPE");
 
-    if (fgets(result, sizeof(result), fp) != NULL) {
-        result[strcspn(result, "\n")] = '\0'; // Remove newline character
-        char* version_only = extract_version_number(result);
-        pclose(fp);
-        if (version_only == NULL) {
-            return NULL;
+    if (session_type && strcmp(session_type, "wayland") == 0) {
+        const char* desktop = getenv("XDG_CURRENT_DESKTOP");
+        const char* session = getenv("DESKTOP_SESSION");
+
+        if (desktop && strstr(desktop, "GNOME")) return strdup("Mutter (Wayland)");
+        if (desktop && strstr(desktop, "KDE") && session &&
+            (strstr(session, "plasma") || strstr(session, "kde"))) {
+            return strdup("KWin (Wayland)");
         }
-        snprintf(result, sizeof(result), "%s %s", shell_name, version_only); // Combine shell name and version
-        free(version_only);
-        return result;
+
+        return strdup("Wayland Compositor");
     }
-    pclose(fp);
-    return NULL;
+
+    if (session_type && strcmp(session_type, "x11") == 0) {
+        Display* display = XOpenDisplay(NULL);
+        if (!display) return strdup("Unknown WM");
+
+        char* wm_name = NULL;
+        Atom wm_atom = XInternAtom(display, "_NET_WM_NAME", True);
+        Atom utf8_string = XInternAtom(display, "UTF8_STRING", True);
+        Window root = DefaultRootWindow(display);
+
+        if (wm_atom != None && utf8_string != None) {
+            Atom actual_type;
+            int actual_format;
+            unsigned long nitems, bytes_after;
+            unsigned char* prop = NULL;
+
+            if (XGetWindowProperty(display, root, wm_atom, 0, 1024, False, utf8_string,
+                                   &actual_type, &actual_format, &nitems, &bytes_after, &prop) == Success &&
+                prop) {
+                wm_name = strdup((char*)prop);
+                XFree(prop);
+            }
+        }
+
+        XCloseDisplay(display);
+        return wm_name ? wm_name : strdup("Unknown WM");
+    }
+
+    return strdup("Unknown");
 }
 
+// A pure function to get system uptime
+char* get_uptime(const struct sysinfo* sys_runtime_info) {
+    long uptime_seconds = sys_runtime_info->uptime;
+    int days = uptime_seconds / (60 * 60 * 24);
+    int hours = (uptime_seconds / (60 * 60)) % 24;
+    int minutes = (uptime_seconds / 60) % 60;
+
+    // Format uptime into a string
+    char* uptime_str = malloc(64); // Enough space for a formatted string
+    if (!uptime_str) handle_error("Memory allocation failed");
+
+    if (days > 0) {
+        snprintf(uptime_str, 64, "%d days, %d hours, %d minutes", days, hours, minutes);
+    } else {
+        snprintf(uptime_str, 64, "%d hours, %d minutes", hours, minutes);
+    }
+
+    return uptime_str;
+}
+
+// Main function
 int main() {
+    struct utsname sys_info = get_system_info();
+    struct sysinfo sys_runtime_info = get_system_runtime_info();
+
     char* os_name = get_os_name();
-    char* desktop_name = get_desktop();
-    char* session_type = get_session();
-    char* kernel = get_kernel();
-    char* uptime = get_uptime();
-    char* hostname = get_hostname();
-    char* shell = get_shell_with_version();
+    char* kernel_info = get_kernel_info(&sys_info);
+    char* session_type = get_session_type();
+    char* desktop_env = get_desktop_environment();
+    char* window_manager = get_window_manager();
+    char* uptime = get_uptime(&sys_runtime_info);
+    char* hostname = strdup(sys_info.nodename);
 
-    if (hostname != NULL) {
-        printf("Hostname: %s\n", hostname);
-        free(hostname);
-    } else {
-        printf("Hostname not found.\n");
-    }
+    printf("Hostname: %s\n", hostname);
+    printf("Operating System: %s\n", os_name ? os_name : "Unknown");
+    printf("Kernel: %s\n", kernel_info);
+    printf("Session Type: %s\n", session_type);
+    printf("Desktop Environment: %s\n", desktop_env);
+    printf("Window Manager/Compositor: %s\n", window_manager);
+    printf("Uptime: %s\n", uptime);
 
-    if (os_name != NULL) {
-        printf("Operating System: %s\n", os_name);
-        free(os_name);
-    } else {
-        printf("Operating System not found.\n");
-    }
-
-    if (desktop_name != NULL) {
-        printf("Desktop Environment / WM: %s\n", desktop_name);
-    } else {
-        printf("Desktop Environment not recognized.\n");
-    }
-
-    if (session_type != NULL) {
-        printf("Session Type: %s\n", session_type);
-        free(session_type);
-    } else {
-        printf("Desktop session not recognized.\n");
-    }
-
-    if (kernel != NULL) {
-        printf("Kernel: %s\n", kernel);
-        free(kernel);
-    } else {
-        printf("Kernel not recognized.\n");
-    }
-
-    if (uptime != NULL) {
-        printf("Uptime: %s\n", uptime);
-        free(uptime);
-    } else {
-        printf("Uptime not recognized.\n");
-    }
-
-    if (shell != NULL) {
-        printf("Shell: %s\n", shell);
-    } else {
-        printf("Shell not recognized.\n");
-    }
+    // Free allocated memory
+    free(os_name);
+    free(kernel_info);
+    free(session_type);
+    free(desktop_env);
+    free(window_manager);
+    free(uptime);
+    free(hostname);
 
     return 0;
 }
